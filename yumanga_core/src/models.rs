@@ -59,4 +59,6 @@ pub struct SourceInfo {
     pub id: String,
     pub name: String,
     pub search_filters: Vec<String>,
+    pub languages: Vec<String>,
+    pub content_rating: Option<u8>,
 }

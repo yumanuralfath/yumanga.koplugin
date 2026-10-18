@@ -100,6 +100,8 @@ fn list_sources() -> ExitCode {
                 .iter()
                 .map(|filter| filter.to_string())
                 .collect(),
+            languages: Vec::new(),
+            content_rating: None,
         })
         .collect::<Vec<_>>();
 
@@ -109,6 +111,8 @@ fn list_sources() -> ExitCode {
             id: source.id,
             name: source.name,
             search_filters: Vec::new(),
+            languages: source.languages,
+            content_rating: source.content_rating,
         })),
         Err(error) => return emit_error(format!("Could not load Aidoku catalog: {error}")),
     }

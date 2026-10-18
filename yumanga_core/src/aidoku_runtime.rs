@@ -35,6 +35,10 @@ struct CatalogSource {
     version: u32,
     #[serde(rename = "downloadURL")]
     download_url: String,
+    #[serde(default)]
+    languages: Vec<String>,
+    #[serde(default)]
+    content_rating: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -85,6 +89,8 @@ pub fn catalog_sources() -> Result<Vec<CatalogSourceInfo>, String> {
         .map(|source| CatalogSourceInfo {
             id: source.id,
             name: source.name,
+            languages: source.languages,
+            content_rating: source.content_rating,
         })
         .collect())
 }
@@ -92,6 +98,8 @@ pub fn catalog_sources() -> Result<Vec<CatalogSourceInfo>, String> {
 pub struct CatalogSourceInfo {
     pub id: String,
     pub name: String,
+    pub languages: Vec<String>,
+    pub content_rating: Option<u8>,
 }
 
 pub fn find_source(source_id: &str) -> Result<Option<Box<dyn Source>>, String> {
@@ -601,12 +609,23 @@ mod tests {
         assert_eq!(catalog.sources.len(), 1);
         assert_eq!(catalog.sources[0].id, "en.example");
         assert_eq!(catalog.sources[0].download_url, "sources/example.aix");
+        assert_eq!(catalog.sources[0].languages, ["en"]);
+        assert_eq!(catalog.sources[0].content_rating, Some(1));
     }
 
     #[test]
     fn rejects_catalog_entries_without_download_url() {
         let source = r#"{"id":"en.example","name":"Example","version":1}"#;
         assert!(serde_json::from_str::<CatalogSource>(source).is_err());
+    }
+
+    #[test]
+    fn defaults_missing_source_filter_metadata() {
+        let source = r#"{"id":"en.example","name":"Example","version":1,"downloadURL":"sources/example.aix"}"#;
+        let source: CatalogSource = serde_json::from_str(source).expect("source should parse");
+
+        assert!(source.languages.is_empty());
+        assert_eq!(source.content_rating, None);
     }
 
     #[test]

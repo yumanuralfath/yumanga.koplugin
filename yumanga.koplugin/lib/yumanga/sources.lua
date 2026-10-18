@@ -2,6 +2,7 @@
 -- are enabled, and warns when too many are enabled for a small e-reader.
 local ConfirmBox = require("ui/widget/confirmbox")
 local InfoMessage = require("ui/widget/infomessage")
+local InputDialog = require("ui/widget/inputdialog")
 local UIManager = require("ui/uimanager")
 local T = require("ffi/util").template
 local _ = require("gettext")
@@ -15,6 +16,14 @@ local Sources = {}
 Sources.MAX_RECOMMENDED = 3
 
 local SETTING = "yumanga_selected_sources"
+local SEARCH_SETTING = "yumanga_source_search"
+local LANGUAGE_SETTING = "yumanga_source_language"
+local RATING_SETTING = "yumanga_source_rating"
+local RATINGS = {
+	[0] = _("Safe"),
+	[1] = _("Suggestive"),
+	[2] = _("NSFW"),
+}
 
 -- Sources known to the core executable: { { id = "...", name = "..." }, ... }.
 -- Cached per session; `refresh` reloads the online Aidoku catalog.
@@ -107,6 +116,144 @@ local function save(ids)
 	G_reader_settings:saveSetting(SETTING, ids)
 end
 
+local function openSearchDialog(touchmenu_instance)
+	local dialog
+	dialog = InputDialog:new({
+		title = _("Search sources"),
+		input = G_reader_settings:readSetting(SEARCH_SETTING) or "",
+		input_hint = _("Source name or ID"),
+		buttons = {
+			{
+				{
+					text = _("Cancel"),
+					id = "close",
+					callback = function()
+						UIManager:close(dialog)
+					end,
+				},
+				{
+					text = _("Search"),
+					is_enter_default = true,
+					callback = function()
+						local query = dialog:getInputText():match("^%s*(.-)%s*$")
+						G_reader_settings:saveSetting(SEARCH_SETTING, query)
+						UIManager:close(dialog)
+						if touchmenu_instance then
+							touchmenu_instance:updateItems()
+						end
+					end,
+				},
+			},
+		},
+	})
+	UIManager:show(dialog)
+	dialog:onShowKeyboard()
+end
+
+local function filterItems(source, query, language, rating)
+	local name = (source.name or ""):lower()
+	local id = (source.id or ""):lower()
+	if query ~= "" and not name:find(query, 1, true) and not id:find(query, 1, true) then
+		return false
+	end
+	if language then
+		local matches_language = false
+		for _i, candidate in ipairs(source.languages or {}) do
+			if candidate == language then
+				matches_language = true
+				break
+			end
+		end
+		if not matches_language then
+			return false
+		end
+	end
+	if rating ~= nil and source.content_rating ~= rating then
+		return false
+	end
+	return true
+end
+
+local function languageOptions(available)
+	local found, languages = {}, {}
+	for _i, source in ipairs(available) do
+		for _j, language in ipairs(source.languages or {}) do
+			if not found[language] then
+				found[language] = true
+				languages[#languages + 1] = language
+			end
+		end
+	end
+	table.sort(languages)
+	local selected = G_reader_settings:readSetting(LANGUAGE_SETTING)
+	local items = {
+		{
+			text = _("All languages"),
+			checked_func = function()
+				return selected == nil
+			end,
+			keep_menu_open = true,
+			callback = function(touchmenu_instance)
+				G_reader_settings:delSetting(LANGUAGE_SETTING)
+				if touchmenu_instance then
+					touchmenu_instance:updateItems()
+				end
+			end,
+		},
+	}
+	for _i, language in ipairs(languages) do
+		items[#items + 1] = {
+			text = language,
+			checked_func = function()
+				return selected == language
+			end,
+			keep_menu_open = true,
+			callback = function(touchmenu_instance)
+				G_reader_settings:saveSetting(LANGUAGE_SETTING, language)
+				if touchmenu_instance then
+					touchmenu_instance:updateItems()
+				end
+			end,
+		}
+	end
+	return items
+end
+
+local function ratingOptions()
+	local selected = G_reader_settings:readSetting(RATING_SETTING)
+	local items = {
+		{
+			text = _("All ratings"),
+			checked_func = function()
+				return selected == nil
+			end,
+			keep_menu_open = true,
+			callback = function(touchmenu_instance)
+				G_reader_settings:delSetting(RATING_SETTING)
+				if touchmenu_instance then
+					touchmenu_instance:updateItems()
+				end
+			end,
+		},
+	}
+	for rating = 0, 2 do
+		items[#items + 1] = {
+			text = RATINGS[rating],
+			checked_func = function()
+				return selected == rating
+			end,
+			keep_menu_open = true,
+			callback = function(touchmenu_instance)
+				G_reader_settings:saveSetting(RATING_SETTING, rating)
+				if touchmenu_instance then
+					touchmenu_instance:updateItems()
+				end
+			end,
+		}
+	end
+	return items
+end
+
 -- Enables or disables one source. Keeps at least one enabled and asks for
 -- confirmation when enabling would pass MAX_RECOMMENDED.
 function Sources.toggle(plugin, source, touchmenu_instance)
@@ -168,22 +315,73 @@ function Sources.menuItems(plugin)
 	if #available == 0 then
 		return { { text = _("No sources found"), enabled = false } }
 	end
-	local items = {}
-	for _i, source in ipairs(available) do
-		local label = source.name
-		if isAidoku(source) then
-			label = T(_("Aidoku: %1"), label)
-		end
-		items[#items + 1] = {
-			text = label,
-			checked_func = function()
-				return Sources.isSelected(plugin, source.id)
-			end,
-			keep_menu_open = true,
+	local query = (G_reader_settings:readSetting(SEARCH_SETTING) or ""):lower()
+	local language = G_reader_settings:readSetting(LANGUAGE_SETTING)
+	local rating = G_reader_settings:readSetting(RATING_SETTING)
+	local items = {
+		{
+			text = query == "" and _("Search sources...") or T(_("Search: %1"), query),
 			callback = function(touchmenu_instance)
-				Sources.toggle(plugin, source, touchmenu_instance)
+				openSearchDialog(touchmenu_instance)
 			end,
-		}
+		},
+		{
+			text = language and T(_("Language: %1"), language) or _("Language: all"),
+			sub_item_table_func = function()
+				return languageOptions(available)
+			end,
+		},
+		{
+			text = rating ~= nil and T(_("Content rating: %1"), RATINGS[rating] or tostring(rating))
+				or _("Content rating: all"),
+			sub_item_table_func = ratingOptions,
+		},
+		{
+			text = _("Clear source filters"),
+			callback = function(touchmenu_instance)
+				G_reader_settings:delSetting(SEARCH_SETTING)
+				G_reader_settings:delSetting(LANGUAGE_SETTING)
+				G_reader_settings:delSetting(RATING_SETTING)
+				if touchmenu_instance then
+					touchmenu_instance:updateItems()
+				end
+			end,
+		},
+	}
+	for _i, source in ipairs(available) do
+		if filterItems(source, query, language, rating) then
+			local label = source.name
+			if isAidoku(source) then
+				local details = {}
+				if #(source.languages or {}) > 0 then
+					if #source.languages <= 3 then
+						details[#details + 1] = table.concat(source.languages, ",")
+					else
+						details[#details + 1] = T(_("%1 languages"), #source.languages)
+					end
+				end
+				if source.content_rating ~= nil then
+					details[#details + 1] = RATINGS[source.content_rating] or tostring(source.content_rating)
+				end
+				label = T(_("Aidoku: %1"), label)
+				if #details > 0 then
+					label = label .. " [" .. table.concat(details, " | ") .. "]"
+				end
+			end
+			items[#items + 1] = {
+				text = label,
+				checked_func = function()
+					return Sources.isSelected(plugin, source.id)
+				end,
+				keep_menu_open = true,
+				callback = function(touchmenu_instance)
+					Sources.toggle(plugin, source, touchmenu_instance)
+				end,
+			}
+		end
+	end
+	if #items == 4 then
+		items[#items + 1] = { text = _("No sources match these filters"), enabled = false }
 	end
 	return items
 end
