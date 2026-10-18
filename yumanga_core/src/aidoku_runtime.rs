@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use aidoku::{Chapter as AidokuChapter, FilterValue, Manga, Page, PageContent};
-use aidoku_test_runner::libs::WasmEnv;
+use aidoku_test_runner::libs::{DefaultValue, UserDefaults, WasmEnv};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value;
 use url::Url;
 use wasmer::{FunctionEnv, Instance, Module, Store};
 use zip::ZipArchive;
@@ -51,6 +52,11 @@ struct AidokuSearchPage {
 struct ResolvedImageRequest {
     url: Option<String>,
     headers: HashMap<String, String>,
+}
+
+struct SourcePackage {
+    wasm: Vec<u8>,
+    defaults: UserDefaults,
 }
 
 fn resolve_image_request_descriptor(
@@ -111,11 +117,12 @@ pub fn find_source(source_id: &str) -> Result<Option<Box<dyn Source>>, String> {
     else {
         return Ok(None);
     };
-    let wasm = load_source_wasm(&source)?;
+    let package = load_source_package(&source)?;
     Ok(Some(Box::new(AidokuSource {
         id: source.id,
         name: source.name,
-        wasm,
+        wasm: package.wasm,
+        defaults: package.defaults,
         manga_by_chapter: Mutex::new(HashMap::new()),
     })))
 }
@@ -157,7 +164,7 @@ fn cache_directory() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("yumanga-aidoku-cache"))
 }
 
-fn load_source_wasm(source: &CatalogSource) -> Result<Vec<u8>, String> {
+fn load_source_package(source: &CatalogSource) -> Result<SourcePackage, String> {
     if source.id.is_empty()
         || source.id.contains("..")
         || !source
@@ -170,8 +177,14 @@ fn load_source_wasm(source: &CatalogSource) -> Result<Vec<u8>, String> {
     let directory = cache_directory();
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let wasm_path = directory.join(format!("{}-v{}.wasm", source.id, source.version));
-    if wasm_path.is_file() {
-        return fs::read(wasm_path).map_err(|error| error.to_string());
+    let settings_path = directory.join(format!("{}-v{}.settings.json", source.id, source.version));
+    if wasm_path.is_file() && settings_path.is_file() {
+        let wasm = fs::read(wasm_path).map_err(|error| error.to_string())?;
+        let settings = fs::read_to_string(settings_path).map_err(|error| error.to_string())?;
+        return Ok(SourcePackage {
+            wasm,
+            defaults: source_defaults_from_settings(&settings, &source.languages)?,
+        });
     }
 
     let catalog_url = Url::parse(CATALOG_URL).map_err(|error| error.to_string())?;
@@ -194,28 +207,124 @@ fn load_source_wasm(source: &CatalogSource) -> Result<Vec<u8>, String> {
 
     let mut archive = ZipArchive::new(Cursor::new(package))
         .map_err(|error| format!("Invalid Aidoku package: {error}"))?;
-    let wasm_file = archive
-        .by_name("Payload/main.wasm")
-        .map_err(|error| format!("Aidoku package has no Payload/main.wasm: {error}"))?;
     let mut wasm = Vec::new();
-    wasm_file
-        .take(32 * 1024 * 1024)
-        .read_to_end(&mut wasm)
-        .map_err(|error| error.to_string())?;
+    {
+        let wasm_file = archive
+            .by_name("Payload/main.wasm")
+            .map_err(|error| format!("Aidoku package has no Payload/main.wasm: {error}"))?;
+        wasm_file
+            .take(32 * 1024 * 1024)
+            .read_to_end(&mut wasm)
+            .map_err(|error| error.to_string())?;
+    }
     if wasm.len() >= 32 * 1024 * 1024 {
         return Err("Aidoku WebAssembly module exceeds the 32 MiB limit".to_string());
     }
+    let mut settings = Vec::new();
+    if let Ok(settings_file) = archive.by_name("Payload/settings.json") {
+        settings_file
+            .take(1024 * 1024)
+            .read_to_end(&mut settings)
+            .map_err(|error| error.to_string())?;
+    } else {
+        settings.extend_from_slice(b"[]");
+    }
+    if settings.len() >= 1024 * 1024 {
+        return Err("Aidoku source settings exceed the 1 MiB limit".to_string());
+    }
+    let settings = String::from_utf8(settings)
+        .map_err(|error| format!("Aidoku source settings are not UTF-8: {error}"))?;
+    let defaults = source_defaults_from_settings(&settings, &source.languages)?;
 
     let temporary_path = wasm_path.with_extension("wasm.part");
     fs::write(&temporary_path, &wasm).map_err(|error| error.to_string())?;
     fs::rename(temporary_path, wasm_path).map_err(|error| error.to_string())?;
-    Ok(wasm)
+    let temporary_settings_path = settings_path.with_extension("settings.json.part");
+    fs::write(&temporary_settings_path, &settings).map_err(|error| error.to_string())?;
+    fs::rename(temporary_settings_path, settings_path).map_err(|error| error.to_string())?;
+    Ok(SourcePackage { wasm, defaults })
+}
+
+fn source_defaults_from_settings(
+    settings: &str,
+    supported_languages: &[String],
+) -> Result<UserDefaults, String> {
+    let settings: Value = serde_json::from_str(settings)
+        .map_err(|error| format!("Could not parse Aidoku source settings: {error}"))?;
+    let mut defaults = UserDefaults::new();
+    collect_source_defaults(&settings, &mut defaults);
+    if defaults.get("languages").is_none() {
+        let languages = supported_languages
+            .iter()
+            .filter(|language| !matches!(language.as_str(), "All" | "multi"))
+            .cloned()
+            .collect::<Vec<_>>();
+        defaults.set(
+            "languages".to_string(),
+            DefaultValue::StringArray(languages),
+        );
+    }
+    Ok(defaults)
+}
+
+fn collect_source_defaults(value: &Value, defaults: &mut UserDefaults) {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                collect_source_defaults(item, defaults);
+            }
+        }
+        Value::Object(object) => {
+            if let (Some(key), Some(value)) = (
+                object.get("key").and_then(Value::as_str),
+                object.get("default"),
+            ) {
+                if let Some(value) = source_default_value(value) {
+                    defaults.set(key.to_string(), value);
+                }
+            }
+            if let Some(items) = object.get("items") {
+                collect_source_defaults(items, defaults);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn source_default_value(value: &Value) -> Option<DefaultValue> {
+    match value {
+        Value::Null => Some(DefaultValue::Null),
+        Value::Bool(value) => Some(DefaultValue::Bool(*value)),
+        Value::Number(value) => value
+            .as_i64()
+            .and_then(|value| i32::try_from(value).ok())
+            .map(DefaultValue::Int)
+            .or_else(|| {
+                value
+                    .as_f64()
+                    .map(|value| DefaultValue::Float(value as f32))
+            }),
+        Value::String(value) => Some(DefaultValue::String(value.clone())),
+        Value::Array(values) => values
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<Vec<_>>>()
+            .map(|values| {
+                DefaultValue::StringArray(values.into_iter().map(str::to_string).collect())
+            }),
+        Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+            .collect::<Option<HashMap<_, _>>>()
+            .map(DefaultValue::HashMap),
+    }
 }
 
 struct AidokuSource {
     id: String,
     name: String,
     wasm: Vec<u8>,
+    defaults: UserDefaults,
     manga_by_chapter: Mutex<HashMap<String, Manga>>,
 }
 
@@ -246,7 +355,9 @@ impl AidokuSource {
         let mut store = Store::default();
         let module = Module::new(&store, self.wasm.as_slice())
             .map_err(|error| format!("Could not load Aidoku source: {error}"))?;
-        let environment = FunctionEnv::new(&mut store, WasmEnv::new());
+        let mut wasm_environment = WasmEnv::new();
+        wasm_environment.defaults = self.defaults.clone();
+        let environment = FunctionEnv::new(&mut store, wasm_environment);
         let imports = aidoku_test_runner::imports::generate_imports(&mut store, &environment);
         let instance = Instance::new(&mut store, &module, &imports)
             .map_err(|error| format!("Could not initialize Aidoku source: {error}"))?;
@@ -301,10 +412,16 @@ impl AidokuSource {
                 .collect::<String>()
                 .trim()
                 .to_string();
-            return Err(if message.is_empty() {
+            let error = if message.is_empty() {
                 "Aidoku source returned an unspecified error".to_string()
             } else {
                 message
+            };
+            let diagnostic = environment.as_ref(&store).stdout.trim();
+            return Err(if diagnostic.is_empty() {
+                error
+            } else {
+                format!("{error}\nAidoku runtime log:\n{diagnostic}")
             });
         }
         let bytes = wasm_environment
@@ -314,7 +431,14 @@ impl AidokuSource {
                     "Could not read Aidoku result at pointer {result_pointer} (length {result_length}): {error}"
                 )
             })?;
-        let result = decode(&bytes, &mut store, &environment);
+        let result = decode(&bytes, &mut store, &environment).map_err(|error| {
+            let diagnostic = environment.as_ref(&store).stdout.trim();
+            if diagnostic.is_empty() {
+                error
+            } else {
+                format!("{error}\nAidoku runtime log:\n{diagnostic}")
+            }
+        });
         if let Ok(free_result) = instance
             .exports
             .get_typed_function::<i32, ()>(&store, "free_result")
@@ -596,8 +720,10 @@ fn safe_cover_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, CatalogSource, resolve_image_request_descriptor};
-    use aidoku_test_runner::libs::{HttpMethod, NetRequest, StoreItem, WasmEnv};
+    use super::{
+        Catalog, CatalogSource, resolve_image_request_descriptor, source_defaults_from_settings,
+    };
+    use aidoku_test_runner::libs::{DefaultValue, HttpMethod, NetRequest, StoreItem, WasmEnv};
     use url::Url;
 
     #[test]
@@ -626,6 +752,43 @@ mod tests {
 
         assert!(source.languages.is_empty());
         assert_eq!(source.content_rating, None);
+    }
+
+    #[test]
+    fn loads_package_defaults_and_falls_back_to_supported_languages() {
+        let defaults = source_defaults_from_settings(
+            r#"[{"type":"group","items":[{"key":"contentRating","default":["safe","suggestive"]}]}]"#,
+            &[
+                "en".to_string(),
+                "id".to_string(),
+                "All".to_string(),
+                "multi".to_string(),
+            ],
+        )
+        .expect("source settings should parse");
+
+        assert!(matches!(
+            defaults.get("contentRating"),
+            Some(DefaultValue::StringArray(values)) if values == &["safe", "suggestive"]
+        ));
+        assert!(matches!(
+            defaults.get("languages"),
+            Some(DefaultValue::StringArray(values)) if values == &["en", "id"]
+        ));
+    }
+
+    #[test]
+    fn preserves_language_defaults_when_the_package_defines_them() {
+        let defaults = source_defaults_from_settings(
+            r#"[{"key":"languages","default":["id","en"]}]"#,
+            &["en".to_string(), "id".to_string()],
+        )
+        .expect("source settings should parse");
+
+        assert!(matches!(
+            defaults.get("languages"),
+            Some(DefaultValue::StringArray(values)) if values == &["id", "en"]
+        ));
     }
 
     #[test]

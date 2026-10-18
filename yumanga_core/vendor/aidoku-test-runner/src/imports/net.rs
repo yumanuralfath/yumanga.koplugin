@@ -65,25 +65,33 @@ pub fn init(mut env: FunctionEnvMut<WasmEnv>, method: u8) -> FFIResult {
         .store(StoreItem::Request(Box::new(request)))
 }
 fn common_send(env: &mut FunctionEnvMut<WasmEnv>, rid: Rid) -> FFIResult {
-    let Some(request) = env
-        .data_mut()
-        .store
-        .get_mut(rid)
-        .and_then(|item| item.as_request())
-    else {
-        return Result::InvalidDescriptor.into();
-    };
-    // add a default user agent if none is provided
-    if !request.headers.contains_key(USER_AGENT) {
-        let default_ua = HeaderValue::from_static(DEFAULT_USER_AGENT);
-        request.headers.insert(USER_AGENT, default_ua);
-    }
-    let Some(url) = request.url.as_ref() else {
-        return Result::InvalidUrl.into();
+    let (method, url, headers, body, timeout) = {
+        let Some(request) = env
+            .data_mut()
+            .store
+            .get_mut(rid)
+            .and_then(|item| item.as_request())
+        else {
+            return Result::InvalidDescriptor.into();
+        };
+        if !request.headers.contains_key(USER_AGENT) {
+            let default_ua = HeaderValue::from_static(DEFAULT_USER_AGENT);
+            request.headers.insert(USER_AGENT, default_ua);
+        }
+        let Some(url) = request.url.clone() else {
+            return Result::InvalidUrl.into();
+        };
+        (
+            request.method,
+            url,
+            request.headers.clone(),
+            request.body.take(),
+            request.timeout.take(),
+        )
     };
     let mut builder = reqwest::blocking::Client::new()
         .request(
-            match request.method {
+            match method {
                 HttpMethod::Get => reqwest::Method::GET,
                 HttpMethod::Post => reqwest::Method::POST,
                 HttpMethod::Put => reqwest::Method::PUT,
@@ -96,24 +104,51 @@ fn common_send(env: &mut FunctionEnvMut<WasmEnv>, rid: Rid) -> FFIResult {
             },
             url.to_string(),
         )
-        .headers(request.headers.clone());
-    if let Some(body) = request.body.take() {
+        .headers(headers);
+    if let Some(body) = body {
         builder = builder.body(body);
     }
-    if let Some(timeout) = request.timeout.take() {
+    if let Some(timeout) = timeout {
         let secs = timeout.trunc() as u64;
         let nanos = ((timeout.fract()) * 1_000_000_000.0).round() as u32;
         builder = builder.timeout(std::time::Duration::new(secs, nanos));
     }
     // make a blocking request with reqwest
-    let Ok(response) = builder.send() else {
-        return Result::RequestError.into();
+    let response = match builder.send() {
+        Ok(response) => response,
+        Err(error) => {
+            env.data_mut()
+                .write_stdout(&format!("HTTP request failed for {url}: {error}\n"));
+            return Result::RequestError.into();
+        }
     };
     let url = response.url().clone();
     let status = response.status();
     let headers = response.headers().clone();
-    let Ok(bytes) = response.bytes() else {
-        return Result::RequestError.into();
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("unknown");
+    let bytes = match response.bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            env.data_mut().write_stdout(&format!(
+                "Could not read HTTP response from {url}: {error}\n"
+            ));
+            return Result::RequestError.into();
+        }
+    };
+    env.data_mut().write_stdout(&format!(
+        "HTTP {status} {url} ({content_type}, {} bytes)\n",
+        bytes.len()
+    ));
+    let Some(request) = env
+        .data_mut()
+        .store
+        .get_mut(rid)
+        .and_then(|item| item.as_request())
+    else {
+        return Result::InvalidDescriptor.into();
     };
     request.response = Some(NetResponse {
         url,
