@@ -133,6 +133,13 @@ function UI.addToMainMenu(plugin, menu_items)
 					end,
 				},
 				{
+					text = _("Refresh source catalog"),
+					help_text = _("Refresh the Aidoku source catalog from the internet."),
+					callback = function(touchmenu_instance)
+						Sources.refresh(plugin, touchmenu_instance)
+					end,
+				},
+				{
 					text_func = function()
 						return Sources.summary(plugin)
 					end,

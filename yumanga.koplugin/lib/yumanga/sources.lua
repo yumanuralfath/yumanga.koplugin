@@ -17,18 +17,49 @@ Sources.MAX_RECOMMENDED = 3
 local SETTING = "yumanga_selected_sources"
 
 -- Sources known to the core executable: { { id = "...", name = "..." }, ... }.
--- Cached per session; `refresh` asks the core again (cheap, no network).
+-- Cached per session; `refresh` reloads the online Aidoku catalog.
 function Sources.available(plugin, refresh)
 	if plugin.sources and not refresh then
 		return plugin.sources
 	end
 	local output, succeeded = Core.run(plugin.plugin_directory, "sources")
-	local data = Core.decodeResponse(output, succeeded)
+	local data, err = Core.decodeResponse(output, succeeded)
 	if not data then
+		plugin.sources_error = err
 		return {} -- not cached, so the next call tries again
 	end
+	plugin.sources_error = nil
 	plugin.sources = data
 	return data
+end
+
+local function isAidoku(source)
+	return source.id:match("^[%w%-]+%.") ~= nil
+end
+
+function Sources.refresh(plugin, touchmenu_instance)
+	plugin.sources = nil
+	local available = Sources.available(plugin, true)
+	if #available == 0 and plugin.sources_error then
+		UIManager:show(InfoMessage:new({
+			text = plugin.sources_error,
+			timeout = 6,
+		}))
+		return
+	end
+	local aidoku_count = 0
+	for _i, source in ipairs(available) do
+		if isAidoku(source) then
+			aidoku_count = aidoku_count + 1
+		end
+	end
+	UIManager:show(InfoMessage:new({
+		text = T(_("Loaded %1 sources, including %2 Aidoku sources."), #available, aidoku_count),
+		timeout = 4,
+	}))
+	if touchmenu_instance then
+		touchmenu_instance:updateItems()
+	end
 end
 
 -- Enabled sources, in the core's order. Falls back to the first source when
@@ -139,8 +170,12 @@ function Sources.menuItems(plugin)
 	end
 	local items = {}
 	for _i, source in ipairs(available) do
+		local label = source.name
+		if isAidoku(source) then
+			label = T(_("Aidoku: %1"), label)
+		end
 		items[#items + 1] = {
-			text = source.name,
+			text = label,
 			checked_func = function()
 				return Sources.isSelected(plugin, source.id)
 			end,
@@ -155,7 +190,14 @@ end
 
 -- "Sources (1/3)" for the parent menu entry.
 function Sources.summary(plugin)
-	return T(_("Sources (%1/%2)"), #Sources.selected(plugin), #Sources.available(plugin))
+	local available = Sources.available(plugin)
+	local aidoku_count = 0
+	for _i, source in ipairs(available) do
+		if isAidoku(source) then
+			aidoku_count = aidoku_count + 1
+		end
+	end
+	return T(_("Sources (%1/%2, %3 Aidoku)"), #Sources.selected(plugin), #available, aidoku_count)
 end
 
 return Sources
