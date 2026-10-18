@@ -192,10 +192,19 @@ jobs:
             [[ -n "$target" ]] || continue
             lower="${target//-/_}"
             upper="$(echo "$lower" | tr '[:lower:]' '[:upper:]')"
+            sysroot="$HOME/x-tools/${CROSS_PREFIX}/${CROSS_PREFIX}/sysroot"
+            if [[ ! -d "$sysroot" ]]; then
+              echo "Missing sysroot for ${CROSS_PREFIX}: ${sysroot}"
+              exit 1
+            fi
             {
               echo "CARGO_TARGET_${upper}_LINKER=${CROSS_PREFIX}-gcc"
               echo "CC_${lower}=${CROSS_PREFIX}-gcc"
               echo "AR_${lower}=${CROSS_PREFIX}-ar"
+              echo "CFLAGS_${lower}=--sysroot=${sysroot}"
+              echo "CPPFLAGS_${lower}=--sysroot=${sysroot}"
+              echo "CXXFLAGS_${lower}=--sysroot=${sysroot}"
+              echo "BINDGEN_EXTRA_CLANG_ARGS_${lower}=--sysroot=${sysroot}"
             } >> "$GITHUB_ENV"
           done
 
