@@ -44,11 +44,36 @@ struct AidokuSearchPage {
     _has_next_page: bool,
 }
 
-#[derive(Deserialize)]
-struct AidokuImageRequest {
+struct ResolvedImageRequest {
     url: Option<String>,
-    #[serde(default)]
     headers: HashMap<String, String>,
+}
+
+fn resolve_image_request_descriptor(
+    environment: &mut WasmEnv,
+    bytes: &[u8],
+) -> Result<ResolvedImageRequest, String> {
+    let descriptor: i32 = postcard::from_bytes(bytes)
+        .map_err(|error| format!("Could not decode Aidoku image request descriptor: {error}"))?;
+    let request = environment
+        .store
+        .get_mut(descriptor)
+        .and_then(|item| item.as_request())
+        .ok_or_else(|| "Aidoku image request descriptor is invalid".to_string())?;
+    let headers = request
+        .headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect();
+    Ok(ResolvedImageRequest {
+        url: request.url.as_ref().map(ToString::to_string),
+        headers,
+    })
 }
 
 pub fn catalog_sources() -> Result<Vec<CatalogSourceInfo>, String> {
@@ -194,10 +219,21 @@ impl AidokuSource {
         Ok(module.exports().any(|export| export.name() == export_name))
     }
 
-    fn invoke<T, F>(&self, call: F) -> Result<T, String>
+    fn invoke<T, F>(&self, operation: &str, call: F) -> Result<T, String>
     where
         T: DeserializeOwned,
         F: FnOnce(&mut Store, &Instance, &FunctionEnv<WasmEnv>) -> Result<i32, String>,
+    {
+        self.invoke_with(call, |bytes, _store, _environment| {
+            postcard::from_bytes(bytes)
+                .map_err(|error| format!("Could not decode Aidoku {operation} result: {error}"))
+        })
+    }
+
+    fn invoke_with<T, F, D>(&self, call: F, decode: D) -> Result<T, String>
+    where
+        F: FnOnce(&mut Store, &Instance, &FunctionEnv<WasmEnv>) -> Result<i32, String>,
+        D: FnOnce(&[u8], &mut Store, &FunctionEnv<WasmEnv>) -> Result<T, String>,
     {
         let mut store = Store::default();
         let module = Module::new(&store, self.wasm.as_slice())
@@ -270,8 +306,7 @@ impl AidokuSource {
                     "Could not read Aidoku result at pointer {result_pointer} (length {result_length}): {error}"
                 )
             })?;
-        let result = postcard::from_bytes(&bytes)
-            .map_err(|error| format!("Could not decode Aidoku result: {error}"));
+        let result = decode(&bytes, &mut store, &environment);
         if let Ok(free_result) = instance
             .exports
             .get_typed_function::<i32, ()>(&store, "free_result")
@@ -282,7 +317,7 @@ impl AidokuSource {
     }
 
     fn update_manga(&self, manga: Manga, details: bool, chapters: bool) -> Result<Manga, String> {
-        self.invoke(|store, instance, environment| {
+        self.invoke("get_manga_update", |store, instance, environment| {
             let descriptor = environment
                 .as_mut(store)
                 .store
@@ -375,26 +410,27 @@ impl Source for AidokuSource {
 
     fn search(&self, keyword: &str, options: &SearchOptions) -> Result<Vec<SearchResult>, String> {
         let query = (!keyword.trim().is_empty()).then(|| keyword.to_string());
-        let mut entries: AidokuSearchPage = self.invoke(|store, instance, environment| {
-            let query_descriptor = environment
-                .as_mut(store)
-                .store
-                .store_encoded(&query)
-                .map_err(|error| error.to_string())?;
-            let filters: Vec<FilterValue> = Vec::new();
-            let filters_descriptor = environment
-                .as_mut(store)
-                .store
-                .store_encoded(&filters)
-                .map_err(|error| error.to_string())?;
-            let search = instance
-                .exports
-                .get_typed_function::<(i32, i32, i32), i32>(store, "get_search_manga_list")
-                .map_err(|error| error.to_string())?;
-            search
-                .call(store, query_descriptor, 1, filters_descriptor)
-                .map_err(|error| error.to_string())
-        })?;
+        let mut entries: AidokuSearchPage =
+            self.invoke("get_search_manga_list", |store, instance, environment| {
+                let query_descriptor = environment
+                    .as_mut(store)
+                    .store
+                    .store_encoded(&query)
+                    .map_err(|error| error.to_string())?;
+                let filters: Vec<FilterValue> = Vec::new();
+                let filters_descriptor = environment
+                    .as_mut(store)
+                    .store
+                    .store_encoded(&filters)
+                    .map_err(|error| error.to_string())?;
+                let search = instance
+                    .exports
+                    .get_typed_function::<(i32, i32, i32), i32>(store, "get_search_manga_list")
+                    .map_err(|error| error.to_string())?;
+                search
+                    .call(store, query_descriptor, 1, filters_descriptor)
+                    .map_err(|error| error.to_string())
+            })?;
 
         if options.with_details {
             for manga in &mut entries.entries {
@@ -442,7 +478,7 @@ impl Source for AidokuSource {
             .and_then(|chapters| chapters.iter().find(|item| item.key == chapter.id))
             .cloned()
             .ok_or_else(|| "Chapter is not present in the Aidoku series".to_string())?;
-        let pages: Vec<Page> = self.invoke(|store, instance, environment| {
+        let pages: Vec<Page> = self.invoke("get_page_list", |store, instance, environment| {
             let manga_descriptor = environment
                 .as_mut(store)
                 .store
@@ -484,28 +520,33 @@ impl Source for AidokuSource {
         if !self.has_export("get_image_request")? {
             return util::get_bytes(&page.url, page.referer.as_deref());
         }
-        let request: AidokuImageRequest = self.invoke(|store, instance, environment| {
-            let url_descriptor = environment
-                .as_mut(store)
-                .store
-                .store_encoded(&page.url)
-                .map_err(|error| error.to_string())?;
-            let context_descriptor = match &page.context {
-                Some(context) => environment
+        let request = self.invoke_with(
+            |store, instance, environment| {
+                let url_descriptor = environment
                     .as_mut(store)
                     .store
-                    .store_encoded(context)
-                    .map_err(|error| error.to_string())?,
-                None => -1,
-            };
-            let get_image_request = instance
-                .exports
-                .get_typed_function::<(i32, i32), i32>(store, "get_image_request")
-                .map_err(|error| error.to_string())?;
-            get_image_request
-                .call(store, url_descriptor, context_descriptor)
-                .map_err(|error| error.to_string())
-        })?;
+                    .store_encoded(&page.url)
+                    .map_err(|error| error.to_string())?;
+                let context_descriptor = match &page.context {
+                    Some(context) => environment
+                        .as_mut(store)
+                        .store
+                        .store_encoded(context)
+                        .map_err(|error| error.to_string())?,
+                    None => -1,
+                };
+                let get_image_request = instance
+                    .exports
+                    .get_typed_function::<(i32, i32), i32>(store, "get_image_request")
+                    .map_err(|error| error.to_string())?;
+                get_image_request
+                    .call(store, url_descriptor, context_descriptor)
+                    .map_err(|error| error.to_string())
+            },
+            |bytes, store, environment| {
+                resolve_image_request_descriptor(environment.as_mut(store), bytes)
+            },
+        )?;
         let url = request.url.as_deref().unwrap_or(&page.url);
         let mut headers = page.headers.clone();
         headers.extend(request.headers.into_iter());
@@ -547,7 +588,9 @@ fn safe_cover_id(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Catalog, CatalogSource};
+    use super::{Catalog, CatalogSource, resolve_image_request_descriptor};
+    use aidoku_test_runner::libs::{HttpMethod, NetRequest, StoreItem, WasmEnv};
+    use url::Url;
 
     #[test]
     fn parses_community_index_entries() {
@@ -564,5 +607,24 @@ mod tests {
     fn rejects_catalog_entries_without_download_url() {
         let source = r#"{"id":"en.example","name":"Example","version":1}"#;
         assert!(serde_json::from_str::<CatalogSource>(source).is_err());
+    }
+
+    #[test]
+    fn resolves_image_request_result_as_host_descriptor() {
+        let mut environment = WasmEnv::new();
+        let mut request = NetRequest::new(HttpMethod::Get);
+        request.url = Some(Url::parse("https://images.example/page.webp").unwrap());
+        let descriptor = environment
+            .store
+            .store(StoreItem::Request(Box::new(request)));
+        let bytes = postcard::to_allocvec(&descriptor).unwrap();
+
+        let image_request = resolve_image_request_descriptor(&mut environment, &bytes).unwrap();
+
+        assert_eq!(
+            image_request.url.as_deref(),
+            Some("https://images.example/page.webp")
+        );
+        assert!(image_request.headers.is_empty());
     }
 }
