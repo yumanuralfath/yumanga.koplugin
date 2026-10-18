@@ -46,6 +46,9 @@ function Core.decodeResponse(output, succeeded)
 
     local response, decode_error = rapidjson.decode(output)
     if not response then
+        if not succeeded then
+            return nil, _("The YuManga core executable failed to start: ") .. output
+        end
         return nil, _("Invalid response from the core: ")
             .. tostring(decode_error)
             .. "\n\n"

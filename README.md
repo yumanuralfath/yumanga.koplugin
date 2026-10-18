@@ -121,19 +121,19 @@ cp yumanga_core/target/debug/yumanga_core \
   yumanga.koplugin/bin/yumanga_core_dev
 ```
 
-This native executable is for running on the build computer, not for installing on a device.
+This normal native build uses the host's glibc and is only suitable when that glibc is available where KOReader runs. Do not copy this executable into the plugin on an older Linux/reader system; use the static build below instead.
 
 ### Aidoku runtime and cross-compilation
 
 Aidoku sources use the Wasmi interpreter backend and are enabled in release binaries for KOReader devices. The host adapter is based on Aidoku's MIT-licensed `aidoku-test-runner`; its canvas calls are intentionally stubbed to avoid requiring desktop Fontconfig/graphics libraries on e-readers. Aidoku webview APIs and some source processing APIs remain unsupported.
 
-For a native development build with Aidoku enabled:
+For a static x86_64 Linux plugin binary (including desktop KOReader on older glibc systems), install Zig and run:
 
 ```
-cargo build --manifest-path yumanga_core/Cargo.toml --features aidoku-runtime
-cp yumanga_core/target/debug/yumanga_core \
-  yumanga.koplugin/bin/yumanga_core_dev
+./yumanga_core/scripts/build-linux-plugin-core.sh
 ```
+
+This builds for `x86_64-unknown-linux-musl` with the Aidoku runtime enabled and installs the binary at `yumanga.koplugin/bin/yumanga_core_dev`. The script also requires the Rust musl target, which it installs with `rustup`.
 
 The runtime reads the community `index.min.json`, caches it and downloaded `.aix` packages under the user's cache directory, and runs a package when that source is selected. Search currently uses the first result page and dynamic Aidoku filters are not yet exposed. Page URL sources and image request headers are supported; archive pages, internally processed images, webview-based requests, canvas rendering, and other APIs not implemented by the host are unsupported. The first catalog fetch requires internet access. Set `YUMANGA_AIDOKU_CACHE_DIR` to choose another cache directory.
 
