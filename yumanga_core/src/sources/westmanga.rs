@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::{SearchOptions, Source};
 use crate::models::{Chapter, PageImage, SearchResult, SeriesChapters};
-use crate::util::{absolute_url, get_text, normalize_whitespace, validate_id, USER_AGENT};
+use crate::util::{USER_AGENT, absolute_url, get_text, normalize_whitespace, validate_id};
 
 const BASE_URL: &str = "https://westmanga.lol";
 
@@ -250,6 +250,8 @@ pub(crate) fn parse_pages_for_site(
         .map(|path| PageImage {
             url: abs(base_url, path),
             referer: Some(chapter.url.clone()),
+            headers: Default::default(),
+            context: None,
         })
         .filter(|page| !page.url.is_empty())
         .collect::<Vec<_>>();

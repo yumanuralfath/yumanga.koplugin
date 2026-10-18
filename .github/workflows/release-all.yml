@@ -48,7 +48,9 @@ jobs:
 
       - name: Run native tests
         working-directory: yumanga_core
-        run: cargo test --locked
+        run: |
+          cargo test --locked
+          cargo test --locked --features aidoku-runtime
 
   build:
     name: Build ${{ matrix.toolchain }}
@@ -246,13 +248,13 @@ jobs:
           if [[ "$USE_SHIM" == "true" ]]; then
             export RUSTFLAGS="-C link-arg=${RUNNER_TEMP}/getauxval_shim.o"
           fi
-          cargo build --locked --release --target "$RUST_TARGET"
+          cargo build --locked --release --features aidoku-runtime --target "$RUST_TARGET"
 
       - name: Fallback - static musl build (${{ matrix.fallback_target }})
         id: build_fallback
         if: steps.build_primary.outcome == 'failure'
         working-directory: yumanga_core
-        run: cargo build --locked --release --target "$FALLBACK_TARGET"
+        run: cargo build --locked --release --features aidoku-runtime --target "$FALLBACK_TARGET"
 
       - name: Package plugin ZIP
         env:

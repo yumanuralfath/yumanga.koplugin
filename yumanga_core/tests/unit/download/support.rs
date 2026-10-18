@@ -45,6 +45,8 @@ impl Source for MockSource {
             .map(|number| PageImage {
                 url: format!("{}/{number}.png", chapter.url),
                 referer: None,
+                headers: Default::default(),
+                context: None,
             })
             .collect())
     }

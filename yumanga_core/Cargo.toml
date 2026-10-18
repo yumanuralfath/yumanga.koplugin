@@ -10,6 +10,10 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[features]
+default = []
+aidoku-runtime = ["dep:aidoku", "dep:aidoku-test-runner", "dep:postcard", "dep:url", "dep:wasmer"]
+
 [dependencies]
 regex = "1"
 scraper = "0.22"
@@ -17,3 +21,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+aidoku = { git = "https://github.com/Aidoku/aidoku-rs", package = "aidoku", default-features = false, features = ["imports"], optional = true }
+aidoku-test-runner = { path = "vendor/aidoku-test-runner", optional = true }
+postcard = { version = "1.1", features = ["alloc"], optional = true }
+url = { version = "2", optional = true }
+wasmer = { version = "6.1", default-features = false, features = ["wasmi-default"], optional = true }

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Serialize)]
 pub struct SearchResult {
@@ -49,6 +50,8 @@ pub struct PageImage {
     pub url: String,
     /// Sent as the `Referer` header when set (many sites hotlink-protect images).
     pub referer: Option<String>,
+    pub headers: HashMap<String, String>,
+    pub context: Option<HashMap<String, String>>,
 }
 
 #[derive(Serialize)]

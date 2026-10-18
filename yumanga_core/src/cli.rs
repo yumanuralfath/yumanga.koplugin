@@ -3,9 +3,9 @@ use serde_json::json;
 use std::env;
 use std::process::ExitCode;
 
+use crate::download;
 use crate::models::SourceInfo;
 use crate::sources::{self, SearchOptions, Source};
-use crate::download;
 
 const USAGE: &str = "Usage:
   core sources
@@ -18,21 +18,11 @@ pub fn run() -> ExitCode {
     let argument = |index: usize| arguments.get(index).map(String::as_str);
 
     match argument(0) {
-        Some("sources") => emit_result(Ok(sources::all()
-            .iter()
-            .map(|source| SourceInfo {
-                id: source.id().to_string(),
-                name: source.name().to_string(),
-                search_filters: source
-                    .search_filters()
-                    .iter()
-                    .map(|filter| filter.to_string())
-                    .collect(),
-            })
-            .collect::<Vec<_>>())),
+        Some("sources") => list_sources(),
         Some("search") => with_source(argument(1), |source| match argument(2) {
             Some(keyword)
-                if !keyword.trim().is_empty() || !argument(5).unwrap_or_default().trim().is_empty() =>
+                if !keyword.trim().is_empty()
+                    || !argument(5).unwrap_or_default().trim().is_empty() =>
             {
                 let genre = argument(5).unwrap_or_default();
                 let mut results = source.search(
@@ -56,7 +46,13 @@ pub fn run() -> ExitCode {
             None => Err("Series ID is required".to_string()),
         }),
         Some("download") => with_source(argument(1), |source| {
-            match (argument(2), argument(3), argument(4), argument(5), argument(6)) {
+            match (
+                argument(2),
+                argument(3),
+                argument(4),
+                argument(5),
+                argument(6),
+            ) {
                 (
                     Some(series_id),
                     Some(selection),
@@ -85,10 +81,51 @@ fn with_source<T: Serialize>(
     let Some(source_id) = source_id else {
         return emit_error("Source ID is required");
     };
-    match sources::find(source_id) {
-        Some(source) => emit_result(action(source.as_ref())),
-        None => emit_error(format!("Unknown source: {source_id}")),
+    match find_source(source_id) {
+        Ok(Some(source)) => emit_result(action(source.as_ref())),
+        Ok(None) => emit_error(format!("Unknown source: {source_id}")),
+        Err(error) => emit_error(error),
     }
+}
+
+fn list_sources() -> ExitCode {
+    #[allow(unused_mut)]
+    let mut available = sources::all()
+        .iter()
+        .map(|source| SourceInfo {
+            id: source.id().to_string(),
+            name: source.name().to_string(),
+            search_filters: source
+                .search_filters()
+                .iter()
+                .map(|filter| filter.to_string())
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    #[cfg(feature = "aidoku-runtime")]
+    match crate::aidoku_runtime::catalog_sources() {
+        Ok(catalog) => available.extend(catalog.into_iter().map(|source| SourceInfo {
+            id: source.id,
+            name: source.name,
+            search_filters: Vec::new(),
+        })),
+        Err(error) => return emit_error(format!("Could not load Aidoku catalog: {error}")),
+    }
+
+    emit_result(Ok(available))
+}
+
+fn find_source(source_id: &str) -> Result<Option<Box<dyn Source>>, String> {
+    if let Some(source) = sources::find(source_id) {
+        return Ok(Some(source));
+    }
+
+    #[cfg(feature = "aidoku-runtime")]
+    return crate::aidoku_runtime::find_source(source_id);
+
+    #[cfg(not(feature = "aidoku-runtime"))]
+    Ok(None)
 }
 
 fn emit_result<T: Serialize>(result: Result<T, String>) -> ExitCode {

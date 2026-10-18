@@ -11,9 +11,20 @@ pub fn get_text(url: &str) -> Result<String, String> {
 }
 
 pub fn get_bytes(url: &str, referer: Option<&str>) -> Result<Vec<u8>, String> {
+    get_bytes_with_headers(url, referer, &std::collections::HashMap::new())
+}
+
+pub fn get_bytes_with_headers(
+    url: &str,
+    referer: Option<&str>,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<Vec<u8>, String> {
     let mut request = ureq::get(url).set("User-Agent", USER_AGENT);
     if let Some(referer) = referer {
         request = request.set("Referer", referer);
+    }
+    for (name, value) in headers {
+        request = request.set(name, value);
     }
     let response = request.call().map_err(|error| error.to_string())?;
     let mut data = Vec::new();

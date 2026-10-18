@@ -7,8 +7,8 @@ use std::path::Path;
 use super::{SearchOptions, Source};
 use crate::models::{Chapter, PageImage, SearchResult, SeriesChapters};
 use crate::util::{
-    absolute_url, get_text, id_from_href, normalize_whitespace, read_response_text, validate_id,
-    USER_AGENT,
+    USER_AGENT, absolute_url, get_text, id_from_href, normalize_whitespace, read_response_text,
+    validate_id,
 };
 
 const BASE_URL: &str = "https://weebcentral.com";
@@ -283,6 +283,8 @@ fn parse_pages(chapter: &Chapter, chapter_html: &str) -> Result<Vec<PageImage>, 
         .map(|number| PageImage {
             url: format!("{prefix}{number:0width$}{extension}"),
             referer: Some(referer.clone()),
+            headers: Default::default(),
+            context: None,
         })
         .collect())
 }

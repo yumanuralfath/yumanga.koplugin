@@ -1,16 +1,13 @@
 # YuManga Downloader for KOReader
 
-
 https://github.com/user-attachments/assets/cc885bff-f19d-4ae5-8281-e2cfb4f2eb92
-
-
-
 
 KOReader plugin to search manga from multiple sources (including WeebCentral), select chapters, and download them as CBZ files. The KOReader interface is written in Lua; the downloader core is written in Rust.
 
 ## Features
 
 - Multi-source support: search manga across multiple sources (such as WeebCentral) from inside KOReader. Results show the cover, title, author, status, type, year and tags.
+- Optional Linux prototype for the [Aidoku Community source catalog](https://aidoku-community.github.io/sources/index.min.json), loading source packages on demand.
 - Optional genre filtering across sources, using each source's available manga tags. Leave the title blank to search by genre alone. Genre filtering loads result details even when extra search details are disabled.
 - Source switcher: easily select and configure which manga sources are active directly from the KOReader menu.
 - Manga detail page with a large cover, status/type badges, tag chips, last update date and a scrollable synopsis.
@@ -126,6 +123,20 @@ cp yumanga_core/target/debug/yumanga_core \
 
 This native executable is for running on the build computer, not for installing on a device.
 
+### Aidoku runtime and cross-compilation
+
+Aidoku sources use the Wasmi interpreter backend and are enabled in release binaries for KOReader devices. The host adapter is based on Aidoku's MIT-licensed `aidoku-test-runner`; its canvas calls are intentionally stubbed to avoid requiring desktop Fontconfig/graphics libraries on e-readers. Aidoku webview APIs and some source processing APIs remain unsupported.
+
+For a native development build with Aidoku enabled:
+
+```
+cargo build --manifest-path yumanga_core/Cargo.toml --features aidoku-runtime
+cp yumanga_core/target/debug/yumanga_core \
+  yumanga.koplugin/bin/yumanga_core_dev
+```
+
+The runtime reads the community `index.min.json`, caches it and downloaded `.aix` packages under the user's cache directory, and runs a package when that source is selected. Search currently uses the first result page and dynamic Aidoku filters are not yet exposed. Page URL sources and image request headers are supported; archive pages, internally processed images, webview-based requests, canvas rendering, and other APIs not implemented by the host are unsupported. The first catalog fetch requires internet access. Set `YUMANGA_AIDOKU_CACHE_DIR` to choose another cache directory.
+
 ### Cross-compile with a koxtoolchain
 
 Example for `kindlehf`. Download the archive from the [koxtoolchain release](https://github.com/koreader/koxtoolchain/releases/tag/2026.08) and extract it under `$HOME`. It creates `$HOME/x-tools/<compiler-prefix>`.
@@ -138,7 +149,7 @@ cd yumanga_core
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-kindlehf-linux-gnueabihf-gcc \
 CC_armv7_unknown_linux_gnueabihf=arm-kindlehf-linux-gnueabihf-gcc \
 AR_armv7_unknown_linux_gnueabihf=arm-kindlehf-linux-gnueabihf-ar \
-cargo build --release --target armv7-unknown-linux-gnueabihf
+cargo build --release --features aidoku-runtime --target armv7-unknown-linux-gnueabihf
 
 install -D -m 755 \
   target/armv7-unknown-linux-gnueabihf/release/yumanga_core \

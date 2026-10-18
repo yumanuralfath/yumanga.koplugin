@@ -1,0 +1,454 @@
+use ego_tree::NodeId;
+use scraper::{CaseSensitivity, ElementRef, Html, Selector};
+use std::{ops::Deref, rc::Rc};
+use url::Url;
+
+#[derive(Debug, Clone)]
+pub struct HtmlDocument {
+    pub html: Rc<Html>,
+    pub base_uri: Option<Rc<Url>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HtmlElement(pub HtmlNode);
+
+#[derive(Debug, Clone)]
+pub struct HtmlNode {
+    pub html: Rc<Html>,
+    pub base_uri: Option<Rc<Url>>,
+    pub id: NodeId,
+}
+
+#[derive(Debug, Clone)]
+pub struct HtmlElementList(pub Vec<HtmlElement>);
+
+impl HtmlDocument {
+    pub fn parse(html: &str, base_uri: Option<&str>) -> Self {
+        let html = Html::parse_document(html);
+        let base_uri = base_uri.and_then(|s| Url::parse(s).ok()).map(Rc::new);
+        Self {
+            html: Rc::new(html),
+            base_uri,
+        }
+    }
+
+    pub fn parse_fragment(html: &str, base_uri: Option<&str>) -> Self {
+        let html = Html::parse_fragment(html);
+        let base_uri = base_uri.and_then(|s| Url::parse(s).ok()).map(Rc::new);
+        Self {
+            html: Rc::new(html),
+            base_uri,
+        }
+    }
+
+    pub fn select(&self, selector: &Selector) -> HtmlElementList {
+        let elements: Vec<HtmlElement> = self
+            .html
+            .select_with_root(selector)
+            .map(|element| {
+                HtmlElement(HtmlNode {
+                    html: self.html.clone(),
+                    base_uri: self.base_uri.clone(),
+                    id: element.id(),
+                })
+            })
+            .collect();
+
+        HtmlElementList(elements)
+    }
+}
+
+impl HtmlNode {
+    pub fn is_element(&self) -> bool {
+        let Some(node) = self.html.tree.get(self.id) else {
+            return false;
+        };
+        node.value().is_element()
+    }
+
+    pub fn is_document(&self) -> bool {
+        let Some(node) = self.html.tree.get(self.id) else {
+            return false;
+        };
+        node.value().is_document()
+    }
+
+    pub fn is_text(&self) -> bool {
+        let Some(node) = self.html.tree.get(self.id) else {
+            return false;
+        };
+        node.value().is_text()
+    }
+
+    pub fn is_comment(&self) -> bool {
+        let Some(node) = self.html.tree.get(self.id) else {
+            return false;
+        };
+        node.value().is_comment()
+    }
+
+    pub fn child_nodes(&self) -> Option<Vec<HtmlNode>> {
+        let node = self.html.tree.get(self.id)?;
+        Some(
+            node.children()
+                .map(|node| self.child_node(node.id()))
+                .collect::<Vec<HtmlNode>>(),
+        )
+    }
+
+    pub fn parent(&self) -> Option<HtmlNode> {
+        let node = self.html.tree.get(self.id)?;
+        node.parent().map(|node| self.child_node(node.id()))
+    }
+
+    pub fn siblings(&self) -> Option<Vec<HtmlNode>> {
+        let node = self.html.tree.get(self.id)?;
+        Some(
+            node.next_siblings()
+                .map(|node| self.child_node(node.id()))
+                .collect::<Vec<HtmlNode>>(),
+        )
+    }
+
+    pub fn next_sibling(&self) -> Option<HtmlNode> {
+        let node = self.html.tree.get(self.id)?;
+        node.next_sibling().map(|node| self.child_node(node.id()))
+    }
+
+    pub fn prev_sibling(&self) -> Option<HtmlNode> {
+        let node = self.html.tree.get(self.id)?;
+        node.prev_sibling().map(|node| self.child_node(node.id()))
+    }
+
+    pub fn text(&self) -> Option<String> {
+        let node = self.html.tree.get(self.id)?;
+        if let Some(text) = node.value().as_text() {
+            Some(text.deref().into())
+        } else {
+            None
+        }
+    }
+
+    fn child_node(&self, id: NodeId) -> HtmlNode {
+        HtmlNode {
+            html: self.html.clone(),
+            base_uri: self.base_uri.clone(),
+            id,
+        }
+    }
+}
+
+impl HtmlElement {
+    pub fn select(&self, selector: &Selector) -> Option<HtmlElementList> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+
+        let elements: Vec<HtmlElement> = element
+            .select_with_root(selector)
+            .map(|element| self.child(element.id()))
+            .collect();
+
+        Some(HtmlElementList(elements))
+    }
+
+    pub fn select_first(&self, selector: &Selector) -> Option<HtmlElement> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+
+        element
+            .select_with_root(selector)
+            .next()
+            .map(|element| self.child(element.id()))
+    }
+
+    pub fn attr(&self, name: &str) -> Option<String> {
+        let has_abs_prefix = name.starts_with("abs:");
+        let name = if has_abs_prefix { &name[4..] } else { name };
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        let attr = element.attr(name).map(|value| value.to_string());
+        if has_abs_prefix {
+            if let Some(base_uri) = self.0.base_uri.as_ref() {
+                attr.as_ref()
+                    // if the attribute is already a url, return it
+                    .and_then(|value| Url::parse(value).ok())
+                    .map(|url| url.to_string())
+                    .or_else(|| {
+                        // otherwise, try to join it with the base uri
+                        attr.as_ref()
+                            .and_then(|value| base_uri.join(value.as_str()).ok())
+                            .map(|value| value.to_string())
+                    })
+            } else {
+                attr
+            }
+        } else {
+            attr
+        }
+    }
+
+    pub fn text(&self, trimmed: bool) -> Option<String> {
+        let result = ElementRef::wrap(self.0.html.tree.get(self.0.id)?)?
+            .text()
+            .collect::<String>();
+        if trimmed {
+            Some(result.trim().to_string())
+        } else {
+            Some(result)
+        }
+    }
+
+    pub fn html(&self) -> Option<String> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(element.inner_html())
+    }
+
+    pub fn outer_html(&self) -> Option<String> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(element.html())
+    }
+
+    pub fn parent(&self) -> Option<HtmlElement> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        element.parent().map(|element| self.child(element.id()))
+    }
+
+    pub fn children(&self) -> Option<HtmlElementList> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(HtmlElementList(
+            element
+                .child_elements()
+                .map(|element| self.child(element.id()))
+                .collect::<Vec<HtmlElement>>(),
+        ))
+    }
+
+    pub fn siblings(&self) -> Option<HtmlElementList> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(HtmlElementList(
+            element
+                .next_siblings()
+                .map(|element| self.child(element.id()))
+                .collect::<Vec<HtmlElement>>(),
+        ))
+    }
+
+    pub fn next_sibling(&self) -> Option<HtmlElement> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        element
+            .next_sibling()
+            .map(|element| self.child(element.id()))
+    }
+
+    pub fn prev_sibling(&self) -> Option<HtmlElement> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        element
+            .prev_sibling()
+            .map(|element| self.child(element.id()))
+    }
+
+    pub fn own_text(&self) -> Option<String> {
+        ElementRef::wrap(self.0.html.tree.get(self.0.id)?)?
+            .text()
+            .next()
+            .map(|text| text.to_string())
+    }
+
+    pub fn id(&self) -> Option<String> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        element.value().id().map(|s| s.to_string())
+    }
+
+    pub fn tag_name(&self) -> Option<String> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(element.value().name().to_string())
+    }
+
+    pub fn class_name(&self) -> Option<String> {
+        let node = self.0.html.tree.get(self.0.id)?;
+        let element = ElementRef::wrap(node)?;
+        Some(element.value().classes().collect::<Vec<&str>>().join(" "))
+    }
+
+    pub fn has_class(&self, class: &str) -> bool {
+        let Some(node) = self.0.html.tree.get(self.0.id) else {
+            return false;
+        };
+        let Some(element) = ElementRef::wrap(node) else {
+            return false;
+        };
+        element
+            .value()
+            .has_class(class, CaseSensitivity::AsciiCaseInsensitive)
+    }
+
+    pub fn has_attr(&self, name: &str) -> bool {
+        let Some(node) = self.0.html.tree.get(self.0.id) else {
+            return false;
+        };
+        let Some(element) = ElementRef::wrap(node) else {
+            return false;
+        };
+        element.value().attrs().any(|(k, _)| k == name)
+    }
+
+    fn child(&self, id: NodeId) -> HtmlElement {
+        HtmlElement(self.child_node(id))
+    }
+
+    fn child_node(&self, id: NodeId) -> HtmlNode {
+        HtmlNode {
+            html: self.0.html.clone(),
+            base_uri: self.0.base_uri.clone(),
+            id,
+        }
+    }
+}
+
+pub enum ConversionError {
+    NotElement,
+}
+
+impl TryFrom<HtmlNode> for HtmlElement {
+    type Error = ConversionError;
+
+    fn try_from(value: HtmlNode) -> Result<Self, Self::Error> {
+        if value.is_element() {
+            Ok(Self(value))
+        } else {
+            Err(ConversionError::NotElement)
+        }
+    }
+}
+
+impl HtmlElementList {
+    pub fn select(&self, selector: &Selector) -> Option<HtmlElementList> {
+        let elements: Vec<HtmlElement> = self
+            .0
+            .iter()
+            .filter_map(|element| element.select(selector).map(|e| e.0))
+            .flatten()
+            .collect();
+        Some(HtmlElementList(elements))
+    }
+
+    pub fn select_first(&self, selector: &Selector) -> Option<HtmlElement> {
+        self.0
+            .iter()
+            .filter_map(|element| element.select(selector).map(|e| e.0))
+            .flatten()
+            .next()
+    }
+
+    pub fn attr(&self, name: &str) -> Option<String> {
+        self.0
+            .iter()
+            .filter_map(|element| element.attr(name))
+            .next()
+    }
+
+    pub fn text(&self, trimmed: bool) -> Option<String> {
+        Some(
+            self.0
+                .iter()
+                .filter_map(|element| element.text(trimmed))
+                .collect::<Vec<String>>()
+                .join(" "),
+        )
+    }
+
+    pub fn html(&self) -> Option<String> {
+        Some(
+            self.0
+                .iter()
+                .filter_map(|element| element.html())
+                .collect::<Vec<String>>()
+                .join("\n"),
+        )
+    }
+
+    pub fn outer_html(&self) -> Option<String> {
+        Some(
+            self.0
+                .iter()
+                .filter_map(|element| element.outer_html())
+                .collect::<Vec<String>>()
+                .join("\n"),
+        )
+    }
+}
+
+pub trait SelectWithRoot<'a, 'b> {
+    fn select_with_root(&'a self, selector: &'b Selector) -> SelectRoot<'a, 'b>;
+}
+
+pub struct SelectRoot<'a, 'b> {
+    root: Option<std::iter::Once<ElementRef<'a>>>,
+    select_el: Option<scraper::element_ref::Select<'a, 'b>>,
+    select_doc: Option<scraper::html::Select<'a, 'b>>,
+}
+
+impl<'a> Iterator for SelectRoot<'a, '_> {
+    type Item = ElementRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.root.is_some() {
+            self.root.take().unwrap().next()
+        } else if let Some(select) = self.select_el.as_mut() {
+            select.next()
+        } else if let Some(select) = self.select_doc.as_mut() {
+            select.next()
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, 'b> SelectWithRoot<'a, 'b> for Html {
+    fn select_with_root(&'a self, selector: &'b Selector) -> SelectRoot<'a, 'b> {
+        let root_el = self.tree.root();
+
+        let root = if let Some(element) = ElementRef::wrap(root_el)
+            && selector.matches(&element)
+        {
+            Some(std::iter::once(element))
+        } else {
+            None
+        };
+
+        let select = self.select(selector);
+
+        SelectRoot {
+            root,
+            select_el: None,
+            select_doc: Some(select),
+        }
+    }
+}
+
+impl<'a, 'b> SelectWithRoot<'a, 'b> for ElementRef<'a> {
+    fn select_with_root(&'a self, selector: &'b Selector) -> SelectRoot<'a, 'b> {
+        let root = if selector.matches(self) {
+            Some(std::iter::once(*self))
+        } else {
+            None
+        };
+
+        let select = self.select(selector);
+
+        SelectRoot {
+            root,
+            select_el: Some(select),
+            select_doc: None,
+        }
+    }
+}

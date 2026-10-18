@@ -28,10 +28,10 @@ pub struct SearchOptions<'a> {
 
 pub trait Source: Sync {
     /// Stable identifier used on the command line, e.g. "weebcentral".
-    fn id(&self) -> &'static str;
+    fn id(&self) -> &str;
 
     /// Human readable name shown in the UI.
-    fn name(&self) -> &'static str;
+    fn name(&self) -> &str;
 
     /// Filters supported by this source, advertised to the plugin UI.
     fn search_filters(&self) -> &'static [&'static str] {

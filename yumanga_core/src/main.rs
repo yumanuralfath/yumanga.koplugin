@@ -1,3 +1,5 @@
+#[cfg(feature = "aidoku-runtime")]
+mod aidoku_runtime;
 mod cli;
 mod download;
 mod models;

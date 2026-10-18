@@ -363,6 +363,8 @@ fn parse_at_home_pages(chapter_id: &str, payload: &Value) -> Result<Vec<PageImag
         .map(|filename| PageImage {
             url: format!("{base_url}/data/{hash}/{filename}"),
             referer: Some(referer.clone()),
+            headers: Default::default(),
+            context: None,
         })
         .collect::<Vec<_>>();
     if pages.is_empty() {

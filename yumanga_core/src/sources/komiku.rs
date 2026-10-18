@@ -5,7 +5,7 @@ use std::path::Path;
 
 use super::{SearchOptions, Source};
 use crate::models::{Chapter, PageImage, SearchResult, SeriesChapters};
-use crate::util::{absolute_url, get_text, normalize_whitespace, read_response_text, USER_AGENT};
+use crate::util::{USER_AGENT, absolute_url, get_text, normalize_whitespace, read_response_text};
 
 const BASE_URL: &str = "https://komiku.org";
 const SEARCH_URL: &str = "https://api.komiku.org/";
@@ -271,6 +271,8 @@ fn parse_pages(chapter: &Chapter, chapter_html: &str) -> Result<Vec<PageImage>, 
         .map(|url| PageImage {
             url: abs(url),
             referer: Some(chapter.url.clone()),
+            headers: Default::default(),
+            context: None,
         })
         .collect::<Vec<_>>();
     if pages.is_empty() {

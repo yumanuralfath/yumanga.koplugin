@@ -7,7 +7,7 @@ use std::path::Path;
 use super::{SearchOptions, Source};
 use crate::models::{Chapter, PageImage, SearchResult, SeriesChapters};
 use crate::util::{
-    absolute_url, get_text, id_from_href, normalize_whitespace, validate_id, USER_AGENT,
+    USER_AGENT, absolute_url, get_text, id_from_href, normalize_whitespace, validate_id,
 };
 
 const BASE_URL: &str = "https://komikindo.ch";
@@ -276,6 +276,8 @@ fn parse_pages(chapter: &Chapter, chapter_html: &str) -> Result<Vec<PageImage>, 
         .map(|url| PageImage {
             url,
             referer: Some(chapter.url.clone()),
+            headers: Default::default(),
+            context: None,
         })
         .collect::<Vec<_>>();
     if pages.is_empty() {
